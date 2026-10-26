@@ -5,6 +5,7 @@ import { RobotScreen } from './screens/RobotScreen';
 import { ControlScreen } from './screens/ControlScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { ScanResultSheet } from './components/ScanResult';
+import { LinkViewer } from './components/LinkViewer';
 import { Mascot } from './components/Mascot';
 
 const TABS: { id: Tab; label: string; title: string; icon: typeof Bluetooth; tone: string }[] = [
@@ -66,6 +67,7 @@ function Shell() {
         </div>
       </nav>
       <ScanResultSheet />
+      <LinkViewer />
     </div>
   );
 }

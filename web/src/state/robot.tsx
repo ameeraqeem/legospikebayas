@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { PybricksHub, errMsg, type HubInfo, type LinkState } from '../lib/pybricks';
 import { autoAssign, configLine, loadSettings, normalizeUrl, PORT_LETTERS, saveSettings, type Detected, type PortLetter, type Settings } from '../lib/settings';
-import { isColorName } from '../lib/colors';
+import { isColorName, type ColorName } from '../lib/colors';
 import { linkWindowOpen, openLink } from '../lib/linkWindow';
 import { haptic, sounds, unlockAudio } from '../lib/feedback';
 
@@ -61,13 +61,20 @@ interface Store {
   history: ScanResult[];
   closeResult: () => void;
   openResultLink: () => void;
+  /** Link shown inside the app. */
+  viewer: { id: number; url: string; color: string } | null;
+  /** Read the colour under the sensor and remember it as this colour. */
+  teachColor: (c: ColorName) => Promise<'ok' | 'nosensor' | 'old' | 'fail'>;
+  resetColors: () => void;
+  openUrl: (url: string, color: string) => void;
+  closeViewer: () => void;
 }
 
 const Ctx = createContext<Store | null>(null);
 
 /** Oldest hub program the app can drive, and the one shipped with this app. */
 export const MIN_HUB_VERSION = 3;
-export const LATEST_HUB_VERSION = 6;
+export const LATEST_HUB_VERSION = 8;
 const DEAD = 0.12;
 
 export function mix(y: number, x: number, speed: number, turnPct: number) {
@@ -126,6 +133,8 @@ export function RobotProvider({ children }: { children: ReactNode }) {
   stickRef.current = stick;
   const readyWaiter = useRef<((ok: boolean) => void) | null>(null);
   const scanWaiter = useRef<((c: string) => void) | null>(null);
+  const hsvWaiter = useRef<((parts: string[]) => void) | null>(null);
+  const verRef = useRef<number | null>(null);
   const qBuf = useRef<Partial<Record<PortLetter, Detected>>>({});
   const scanId = useRef(0);
   const hubRef = useRef<PybricksHub | null>(null);
@@ -157,6 +166,12 @@ export function RobotProvider({ children }: { children: ReactNode }) {
     if (sRef.current.robotType === 'car') void hubRef.current?.send(`G ${sRef.current.steerDeg}`).catch(() => undefined);
     void hubRef.current?.send(configLine(s)).catch(() => undefined);
     void hubRef.current?.send(`O ${sRef.current.obstacleCm * 10}`).catch(() => undefined);
+    // colours taught on this map (hub program v8+)
+    if ((verRef.current ?? 0) >= 8) {
+      for (const [c, v] of Object.entries(sRef.current.calib)) {
+        if (v) void hubRef.current?.send(`T ${c} ${v[0]} ${v[1]} ${v[2]}`).catch(() => undefined);
+      }
+    }
   }, []);
 
   const onPortsDetected = useCallback(
@@ -185,6 +200,7 @@ export function RobotProvider({ children }: { children: ReactNode }) {
         case 'SPIKECTL': {
           const v = Number(parts[1]);
           setHubVersion(Number.isFinite(v) ? v : 1);
+          verRef.current = Number.isFinite(v) ? v : 1;
           if (v >= MIN_HUB_VERSION) markReady();
           else setProgram('old');
           break;
@@ -193,6 +209,7 @@ export function RobotProvider({ children }: { children: ReactNode }) {
           // v1 answered "P EFC" (not a number) — treat as version 1
           const v = /^\d+$/.test(parts[1] ?? '') ? Number(parts[1]) : 1;
           setHubVersion(v);
+          verRef.current = v;
           if (v >= MIN_HUB_VERSION) {
             const wasReady = programRef.current === 'ready';
             markReady();
@@ -245,6 +262,10 @@ export function RobotProvider({ children }: { children: ReactNode }) {
             setObstacleAt(Date.now());
             if (sRef.current.haptics) haptic([30, 40, 30]);
           }
+          break;
+        case 'H':
+          hsvWaiter.current?.(parts.slice(1));
+          hsvWaiter.current = null;
           break;
         case 'K':
           scanWaiter.current?.(parts[1] ?? 'none');
@@ -390,7 +411,11 @@ export function RobotProvider({ children }: { children: ReactNode }) {
   // Manual role edits → push to hub.
   const rolesKey = configLine(settings);
   useEffect(() => {
-    if (programRef.current === 'ready') sendConfig();
+    // wait until the teacher stops tapping, then send once
+    const t = setTimeout(() => {
+      if (programRef.current === 'ready') sendConfig();
+    }, 400);
+    return () => clearTimeout(t);
   }, [rolesKey, sendConfig]);
 
   const testMotor = useCallback((p: PortLetter) => {
@@ -478,6 +503,46 @@ export function RobotProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // ---- scan ----
+  const teachColor = useCallback(async (c: ColorName) => {
+    if (programRef.current !== 'ready') return 'fail' as const;
+    if ((verRef.current ?? 0) < 8) return 'old' as const;
+    const parts = await new Promise<string[] | null>((resolve) => {
+      const t = setTimeout(() => {
+        hsvWaiter.current = null;
+        resolve(null);
+      }, 3000);
+      hsvWaiter.current = (p) => {
+        clearTimeout(t);
+        resolve(p);
+      };
+      void hubRef.current!.send('H').catch(() => resolve(null));
+    });
+    if (!parts) return 'fail' as const;
+    if (parts[0] === 'nosensor') return 'nosensor' as const;
+    const [h, sat, val] = parts.map(Number);
+    if (![h, sat, val].every(Number.isFinite)) return 'fail' as const;
+    const v: [number, number, number] = [h, sat, val];
+    update({ calib: { ...sRef.current.calib, [c]: v } });
+    void hubRef.current!.send(`T ${c} ${h} ${sat} ${val}`).catch(() => undefined);
+    return 'ok' as const;
+  }, [update]);
+  const resetColors = useCallback(() => {
+    update({ calib: {} });
+    if (programRef.current === 'ready' && (verRef.current ?? 0) >= 8) void hubRef.current?.send('T reset').catch(() => undefined);
+  }, [update]);
+
+  const [viewer, setViewer] = useState<Store['viewer']>(null);
+  const viewerId = useRef(0);
+  /** Opens a link the way the teacher chose. Inside the app needs no tap; a window does. */
+  const openUrl = useCallback((url: string, color: string, fromTap = true) => {
+    if (sRef.current.linkMode === 'app') {
+      setViewer({ id: ++viewerId.current, url, color });
+      return true;
+    }
+    return openLink(url, fromTap) === 'window';
+  }, []);
+  const closeViewer = useCallback(() => setViewer(null), []);
+
   const scan = useCallback(async () => {
     if (!canDrive || scanning) return;
     setScanning(true);
@@ -496,15 +561,16 @@ export function RobotProvider({ children }: { children: ReactNode }) {
     setScanning(false);
     const url = isColorName(c) ? normalizeUrl(s.links[c]) : null;
     let opened = false;
-    if (url && linkWindowOpen()) opened = openLink(url) === 'window';
+    if (url && s.linkMode === 'app') opened = openUrl(url, c, false);
+    else if (url && linkWindowOpen()) opened = openLink(url) === 'window';
     if (isColorName(c)) {
       if (s.sound) sounds.detect(c);
       if (s.haptics) haptic([14, 40, 22]);
     } else if (s.sound) sounds.tap();
     const r: ScanResult = { id: ++scanId.current, color: c, at: Date.now(), url, opened };
-    setResult(r);
+    if (!(opened && s.linkMode === 'app')) setResult(r); // in-app link already shows the colour
     setHistory((h) => [r, ...h].slice(0, 30));
-  }, [canDrive, scanning]);
+  }, [canDrive, scanning, openUrl]);
 
   scanRef.current = () => void scan();
 
@@ -513,9 +579,10 @@ export function RobotProvider({ children }: { children: ReactNode }) {
   const openResultLink = useCallback(() => {
     const r = resultRef.current;
     if (!r?.url) return;
-    openLink(r.url, true); // runs inside the tap → allowed to open a window
-    setResult({ ...r, opened: true });
-  }, []);
+    openUrl(r.url, r.color, true); // runs inside the tap → allowed to open a window
+    if (sRef.current.linkMode === 'app') setResult(null);
+    else setResult({ ...r, opened: true });
+  }, [openUrl]);
 
   const value = useMemo<Store>(
     () => ({
@@ -524,8 +591,9 @@ export function RobotProvider({ children }: { children: ReactNode }) {
       connect, reconnect, disconnect, startProgram, restartProgram, rescanPorts,
       setStick, setAccessory, accessory, motors, testMotor, motorTest,
       scanning, scan, result, history, closeResult: () => setResult(null), openResultLink,
+      viewer, openUrl, closeViewer, teachColor, resetColors,
     }),
-    [tab, setTab, settings, update, link, linkError, info, program, hubVersion, hubErrors, detected, deviceIds, batteryMv, batteryLow, color, distanceMm, forcePressed, obstacleAt, connect, reconnect, disconnect, startProgram, restartProgram, rescanPorts, setStick, setAccessory, accessory, motors, testMotor, motorTest, scanning, scan, result, history, openResultLink],
+    [tab, setTab, settings, update, link, linkError, info, program, hubVersion, hubErrors, detected, deviceIds, batteryMv, batteryLow, color, distanceMm, forcePressed, obstacleAt, connect, reconnect, disconnect, startProgram, restartProgram, rescanPorts, setStick, setAccessory, accessory, motors, testMotor, motorTest, scanning, scan, result, history, openResultLink, viewer, openUrl, closeViewer, teachColor, resetColors],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

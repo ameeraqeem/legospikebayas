@@ -8,6 +8,7 @@ App untuk mengawal robot LEGO® SPIKE™ Prime melalui Bluetooth dari iPhone/iPa
 4. **Sensor jarak (ultrasonik)**: papar jarak halangan, dan robot **berhenti automatik sebelum langgar** (jarak boleh diset di Tetapan).
 5. **Sensor tekan**: bila ditekan, boleh IMBAS warna atau hentikan robot (pilih di Tetapan).
 6. **Butang IMBAS**: bila robot sampai di kad warna, tekan IMBAS. Pautan warna itu dibuka. Disokong 10 warna SPIKE: Merah, Oren, Kuning, Hijau, Biru Muda, Biru, Ungu, Merah Jambu, Putih, Hitam. Pautan ditetapkan di tab **Tetapan**.
+7. **Pautan dibuka dalam app**: video, kuiz atau Google Form dipaparkan di atas skrin kawalan, dengan butang **Tutup** besar. Robot kekal bersambung. Ia tutup sendiri bila video YouTube habis atau Google Form dihantar. Kuiz buatan sendiri boleh menutupnya dengan `parent.postMessage('spike-robot:close', '*')`.
 
 ```
 iPhone/iPad (pelayar Bluefy) ──Bluetooth LE──▶ Hub SPIKE Prime (firmware Pybricks)

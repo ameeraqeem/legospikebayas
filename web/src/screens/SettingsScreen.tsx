@@ -5,6 +5,7 @@ import { DEFAULT_SETTINGS, MOTOR_ROLES, PORT_LETTERS, ROBOT_TYPES, autoAssign, m
 import { hapticsSupported } from '../lib/feedback';
 import { useRobot } from '../state/robot';
 import { LinksSection } from '../components/LinksSection';
+import { TeachColors } from '../components/TeachColors';
 import hubProgram from '../hub/robot_control.py?raw';
 
 const ROLE_TONE: Record<Role, string> = {
@@ -99,6 +100,8 @@ export function SettingsScreen() {
   return (
     <div className="mx-auto w-full max-w-xl space-y-7">
       <LinksSection />
+
+      <TeachColors />
 
       <section>
         <SectionLabel>Jenis robot</SectionLabel>

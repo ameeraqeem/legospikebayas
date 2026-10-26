@@ -61,7 +61,13 @@ export interface Settings {
   obstacleCm: number;
   /** What pressing the force sensor does. */
   forceAction: ForceAction;
+  /** Where colour links open: inside the app (robot stays connected) or another window. */
+  linkMode: 'app' | 'window';
+  /** Close the in-app link when a video ends or a form is sent. */
+  autoClose: boolean;
   links: Record<ColorName, string>;
+  /** Colours taught on the real map: hue (0-359), saturation and value (0-100). */
+  calib: Partial<Record<ColorName, [number, number, number]>>;
   sound: boolean;
   haptics: boolean;
 }
@@ -80,7 +86,10 @@ export const DEFAULT_SETTINGS: Settings = {
   autoPorts: true,
   obstacleCm: 15,
   forceAction: 'scan',
+  linkMode: 'app',
+  autoClose: true,
   links: { red: '', orange: '', yellow: '', green: '', azure: '', blue: '', violet: '', magenta: '', white: '', black: '' },
+  calib: {},
   sound: true,
   haptics: true,
 };
@@ -168,13 +177,28 @@ export function loadSettings(): Settings {
       autoPorts: bool(p.autoPorts, d.autoPorts),
       obstacleCm: num(p.obstacleCm, 0, 50, d.obstacleCm),
       forceAction: p.forceAction === 'stop' || p.forceAction === 'none' ? p.forceAction : 'scan',
+      linkMode: p.linkMode === 'window' ? 'window' : 'app',
+      autoClose: bool(p.autoClose, d.autoClose),
       links,
+      calib: readCalib(p.calib),
       sound: bool(p.sound, d.sound),
       haptics: bool(p.haptics, d.haptics),
     };
   } catch {
     return structuredClone(d);
   }
+}
+
+function readCalib(v: unknown): Settings['calib'] {
+  const out: Settings['calib'] = {};
+  if (!v || typeof v !== 'object') return out;
+  for (const c of COLOR_ORDER) {
+    const x = (v as Record<string, unknown>)[c];
+    if (Array.isArray(x) && x.length === 3 && x.every((n) => typeof n === 'number' && Number.isFinite(n))) {
+      out[c] = [Math.round(x[0]) % 360, Math.round(x[1]), Math.round(x[2])];
+    }
+  }
+  return out;
 }
 
 export function saveSettings(s: Settings) {

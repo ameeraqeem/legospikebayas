@@ -1,13 +1,13 @@
-import { AppWindow, ExternalLink, Link2 } from 'lucide-react';
+import { AppWindow, ExternalLink, Link2, MonitorPlay } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { Button, Card, Row, SectionLabel } from './ui';
+import { Button, Card, Row, SectionLabel, Toggle } from './ui';
 import { COLORS, COLOR_ORDER, colorLabel, isColorName, type ColorName } from '../lib/colors';
-import { linkWindowOpen, openLink, prepareLinkWindow } from '../lib/linkWindow';
+import { linkWindowOpen, prepareLinkWindow } from '../lib/linkWindow';
 import { normalizeUrl } from '../lib/settings';
 import { useRobot } from '../state/robot';
 
 function LinkRow({ c, last }: { c: ColorName; last: boolean }) {
-  const { settings, update } = useRobot();
+  const { settings, update, openUrl } = useRobot();
   const [draft, setDraft] = useState(settings.links[c]);
   useEffect(() => setDraft(settings.links[c]), [settings.links, c]);
   const valid = draft.trim() === '' || normalizeUrl(draft) !== null;
@@ -43,7 +43,7 @@ function LinkRow({ c, last }: { c: ColorName; last: boolean }) {
       </div>
       <button
         disabled={!url}
-        onClick={() => url && openLink(url, true)}
+        onClick={() => url && openUrl(url, c)}
         aria-label={`Uji pautan ${COLORS[c].ms}`}
         className="k-btn mt-6 grid h-11 w-11 shrink-0 place-items-center rounded-full bg-white text-ink"
       >
@@ -76,16 +76,47 @@ export function LinksSection() {
       </section>
 
       <section>
-        <SectionLabel>Tetingkap pautan (pilihan)</SectionLabel>
-        <Card className="flex flex-col items-center p-4 text-center">
-          <div className={`grid h-12 w-12 place-items-center rounded-[14px] border-[3px] border-ink ${winOpen ? 'bg-k-green text-white' : 'bg-fill'}`}><AppWindow size={24} /></div>
-          <div className="mt-2 text-[17px] font-semibold">{winOpen ? 'Tetingkap pautan terbuka ✓' : 'Buka pautan secara automatik'}</div>
-          <p className="mt-1 max-w-sm text-[14px] leading-snug text-ink-2">Buka sekali sebelum mula. Pautan akan terus muncul di tetingkap itu setiap kali imbas, tanpa perlu tekan apa-apa.</p>
-          <Button className="mt-3" tone={winOpen ? 'white' : 'blue'} icon={<AppWindow size={18} />} onClick={() => { const ok = prepareLinkWindow(); setBlocked(!ok); setWinOpen(ok); }}>
-            {winOpen ? 'Buka semula' : 'Buka tetingkap pautan'}
-          </Button>
-          {blocked && <p className="mt-2 text-[13px] font-semibold text-k-red">Pelayar menyekat tetingkap baharu. Benarkan pop-up, kemudian cuba lagi.</p>}
-        </Card>
+        <SectionLabel>Cara buka pautan</SectionLabel>
+        <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Cara buka pautan">
+          {([
+            { id: 'app', icon: <MonitorPlay size={24} />, name: 'Dalam app', hint: 'Disyorkan · ada butang Tutup' },
+            { id: 'window', icon: <AppWindow size={24} />, name: 'Tetingkap lain', hint: 'Untuk laman yang tidak boleh dibuka dalam app' },
+          ] as const).map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              role="radio"
+              aria-checked={r.settings.linkMode === m.id}
+              onClick={() => r.update({ linkMode: m.id })}
+              className={`k-card flex min-w-0 flex-col items-center gap-1 px-2 py-3 text-center ${r.settings.linkMode === m.id ? 'bg-k-yellow' : ''}`}
+            >
+              {m.icon}
+              <span className="text-[15px] font-bold leading-tight">{m.name}</span>
+              <span className="text-[12px] leading-tight text-ink-2">{m.hint}</span>
+            </button>
+          ))}
+        </div>
+
+        {r.settings.linkMode === 'app' ? (
+          <Card className="mt-3 p-4">
+            <label className="flex items-center justify-between gap-3">
+              <span>
+                <span className="block text-[16px] font-semibold">Tutup sendiri bila selesai</span>
+                <span className="block text-[13px] leading-snug text-ink-2">Bila video YouTube habis atau Google Form dihantar, pautan ditutup dan robot sedia dipandu semula.</span>
+              </span>
+              <Toggle label="Tutup sendiri bila selesai" checked={r.settings.autoClose} onChange={(v) => r.update({ autoClose: v })} />
+            </label>
+          </Card>
+        ) : (
+          <Card className="mt-3 flex flex-col items-center p-4 text-center">
+            <div className="text-[16px] font-semibold">{winOpen ? 'Tetingkap pautan terbuka ✓' : 'Buka tetingkap pautan dahulu'}</div>
+            <p className="mt-1 max-w-sm text-[13px] leading-snug text-ink-2">Buka sekali sebelum mula. Setiap imbasan akan membuka pautan di tetingkap itu.</p>
+            <Button className="mt-3" tone={winOpen ? 'white' : 'blue'} icon={<AppWindow size={18} />} onClick={() => { const ok = prepareLinkWindow(); setBlocked(!ok); setWinOpen(ok); }}>
+              {winOpen ? 'Buka semula' : 'Buka tetingkap pautan'}
+            </Button>
+            {blocked && <p className="mt-2 text-[13px] font-semibold text-k-red">Pelayar menyekat tetingkap baharu. Benarkan pop-up, kemudian cuba lagi.</p>}
+          </Card>
+        )}
       </section>
 
       {r.history.length > 0 && (

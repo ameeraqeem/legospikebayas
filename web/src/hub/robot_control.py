@@ -1,4 +1,4 @@
-# ROBOT SPIKE — program hub (Pybricks firmware, SPIKE Prime)  versi 6
+# ROBOT SPIKE — program hub (Pybricks firmware, SPIKE Prime)  versi 8
 # Copyright (c) 2026 ameermustaqeem. Hak cipta terpelihara.
 # Pasang SEKALI melalui https://code.pybricks.com  (tampal kod ini, tekan Run).
 # Selepas itu app di iPhone/iPad memulakan program ini sendiri.
@@ -24,9 +24,12 @@
 #   K                    imbas warna sekarang -> "K red" / "K none" / "K nosensor"
 #                        warna: red orange yellow green azure blue violet
 #                               magenta white black none
-#   P                    ping -> "P 6"
+#   H                    ukur warna di bawah sensor -> "H <hue> <sat> <val>"
+#   T <warna> <h> <s> <v> ajar warna (contoh: T magenta 335 40 85)
+#   T reset              kembali ke warna asal LEGO
+#   P                    ping -> "P 8"
 #   X                    tamatkan program
-# Mesej ke app: SPIKECTL 6, Q ..., M ok, C <warna> (bila berubah),
+# Mesej ke app: SPIKECTL 8, Q ..., M ok, C <warna> (bila berubah),
 #               U <mm> (jarak, 2000 = tiada objek), F <tekan 0/1> <daya x10>,
 #               O stop (berhenti kerana halangan), B <mV> (bateri),
 #               E <port> <peranan> (ralat), W (watchdog)
@@ -40,20 +43,37 @@ from pybricks.pupdevices import Motor, ColorSensor, UltrasonicSensor, ForceSenso
 from pybricks.parameters import Port, Direction, Color, Stop
 from pybricks.tools import wait, StopWatch
 from pybricks.iodevices import PUPDevice
-from usys import stdin
-from uerrno import ENODEV
-from uselect import poll
+try:
+    from usys import stdin
+except ImportError:  # newer Pybricks firmware
+    from sys import stdin
+try:
+    from uerrno import ENODEV
+except ImportError:
+    from errno import ENODEV
+try:
+    from uselect import poll
+except ImportError:
+    from select import poll
+try:
+    from gc import collect
+except ImportError:
+    def collect():
+        pass
 
 NAMES = "ABCDEF"
 PORTS = (Port.A, Port.B, Port.C, Port.D, Port.E, Port.F)
 # Semua warna yang boleh dikenal pasti oleh SPIKE Prime Color Sensor.
 # Color.CYAN = "biru muda" (azure) LEGO.
-COLORS = ((Color.RED, "red"), (Color.ORANGE, "orange"), (Color.YELLOW, "yellow"),
-          (Color.GREEN, "green"), (Color.CYAN, "azure"), (Color.BLUE, "blue"),
-          (Color.VIOLET, "violet"), (Color.MAGENTA, "magenta"),
-          (Color.WHITE, "white"), (Color.BLACK, "black"))
-DETECTABLE = [Color.RED, Color.ORANGE, Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE,
-              Color.VIOLET, Color.MAGENTA, Color.WHITE, Color.BLACK, Color.NONE]
+DEFAULT_COLORS = ((Color.RED, "red"), (Color.ORANGE, "orange"), (Color.YELLOW, "yellow"),
+                  (Color.GREEN, "green"), (Color.CYAN, "azure"), (Color.BLUE, "blue"),
+                  (Color.VIOLET, "violet"), (Color.MAGENTA, "magenta"),
+                  (Color.WHITE, "white"), (Color.BLACK, "black"))
+# The colours the sensor compares against. The app can replace any of them with the
+# colour measured on the real map ("Ajar warna"), because printed colours differ from
+# LEGO bricks.
+COLORS = [list(pair) for pair in DEFAULT_COLORS]
+DETECTABLE = [pair[0] for pair in COLORS] + [Color.NONE]
 LIGHT = {"red": Color.RED, "orange": Color.ORANGE, "yellow": Color.YELLOW, "green": Color.GREEN,
          "azure": Color.CYAN, "blue": Color.BLUE, "violet": Color.VIOLET, "magenta": Color.MAGENTA,
          "white": Color.WHITE}
@@ -143,27 +163,13 @@ def device_id(i):
 
 
 def try_open(i):
-    # fallback: open the port as each device type in turn
-    try:
-        Motor(PORTS[i])
-        return "motor"
-    except Exception:
-        pass
-    try:
-        ColorSensor(PORTS[i])
-        return "color"
-    except Exception:
-        pass
-    try:
-        UltrasonicSensor(PORTS[i])
-        return "ultra"
-    except Exception:
-        pass
-    try:
-        ForceSensor(PORTS[i])
-        return "force"
-    except Exception:
-        pass
+    # fallback: open the port as each device type in turn (kept open for reuse)
+    for kind, name in (("M", "motor"), ("C", "color"), ("U", "ultra"), ("F", "force")):
+        try:
+            open_dev(kind, i)
+            return name
+        except Exception:
+            pass
     return "none"
 
 
@@ -179,8 +185,66 @@ def detect(i):
     return try_open(i), str(did)
 
 
+class Flip:
+    # a motor that turns the other way, without opening the port a second time
+    def __init__(self, m, sign):
+        self.m = m
+        self.sign = sign
+
+    def dc(self, v):
+        self.m.dc(v * self.sign)
+
+    def stop(self):
+        self.m.stop()
+
+    def reset_angle(self, a):
+        self.m.reset_angle(a * self.sign)
+
+    def run_target(self, speed, a, then, w):
+        self.m.run_target(speed, a * self.sign, then, w)
+
+
+# Each port is opened ONCE and reused: opening a port again while the old
+# object still holds it gives "EBUSY" (errno 16) on newer firmware.
+opened = {}
+failed = 0  # ports that could not be opened at the last setup
+EBUSY = 16
+EAGAIN = 11
+
+
+def make(kind, i):
+    if kind == "C":
+        return ColorSensor(PORTS[i])
+    if kind == "U":
+        return UltrasonicSensor(PORTS[i])
+    if kind == "F":
+        return ForceSensor(PORTS[i])
+    return Motor(PORTS[i], Direction.CLOCKWISE)
+
+
+def open_dev(kind, i):
+    # reuse what is already open on this port; otherwise open it, retrying while busy
+    have = opened.get(i)
+    if have is not None and have[0] == kind:
+        return have[1]
+    last = None
+    for _ in range(8):
+        try:
+            dev = make(kind, i)
+            opened[i] = (kind, dev)
+            return dev
+        except OSError as ex:
+            last = ex
+            if ex.args and ex.args[0] in (EBUSY, EAGAIN):
+                collect()  # free old objects that may still hold the port
+                wait(250)  # port still starting up / switching mode
+            else:
+                raise
+    raise last
+
+
 def setup():
-    global lefts, rights, extras, steers, steer_target, sensor, ultra, force
+    global lefts, rights, extras, steers, steer_target, sensor, ultra, force, failed
     stop_all()
     if steers:
         wait(300)  # let the steering come back to the centre first
@@ -192,26 +256,21 @@ def setup():
     sensor = None
     ultra = None
     force = None
+    failed = 0
     for i in range(6):
         r = roles[i]
         if r == "N":
             continue
         try:
             if r == "C":
-                sensor = ColorSensor(PORTS[i])
-                try:
-                    sensor.detectable_colors(DETECTABLE)
-                except Exception:
-                    pass
+                sensor = open_dev("C", i)
+                use_colors()
             elif r == "U":
-                ultra = UltrasonicSensor(PORTS[i])
+                ultra = open_dev("U", i)
             elif r == "F":
-                force = ForceSensor(PORTS[i])
+                force = open_dev("F", i)
             else:
-                if inverts[i] == "1":
-                    m = Motor(PORTS[i], Direction.COUNTERCLOCKWISE)
-                else:
-                    m = Motor(PORTS[i], Direction.CLOCKWISE)
+                m = Flip(open_dev("M", i), -1 if inverts[i] == "1" else 1)
                 if r == "L":
                     lefts.append(m)
                 elif r == "R":
@@ -222,6 +281,7 @@ def setup():
                 else:
                     extras.append(m)
         except Exception as ex:
+            failed = failed + 1
             out("E " + NAMES[i] + " " + r + " " + str(ex))
 
 
@@ -229,7 +289,7 @@ def test_motor(i):
     # spin one motor briefly so pupils can see which port it is on
     stop_all()
     try:
-        m = Motor(PORTS[i])
+        m = open_dev("M", i)
         m.dc(50)
         wait(350)
         m.dc(-50)
@@ -242,12 +302,69 @@ def test_motor(i):
 
 
 def scan_ports():
+    global opened
     stop_all()
+    opened = {}  # cables may have moved: open everything afresh
     for i in range(6):
         kind, did = detect(i)
         out("Q " + NAMES[i] + " " + kind + " " + did)
     out("Q end")
+    wait(300)  # let the ports settle after detection
     setup()  # detection replaced the device objects; rebuild them
+
+
+def use_colors():
+    global DETECTABLE
+    DETECTABLE = [pair[0] for pair in COLORS] + [Color.NONE]
+    if sensor is not None:
+        try:
+            sensor.detectable_colors(DETECTABLE)
+        except Exception:
+            pass
+
+
+def measure():
+    # average of 5 readings; hue is on a circle (359 is next to 0)
+    hs = []
+    ss = 0
+    vs = 0
+    for _ in range(5):
+        c = sensor.hsv()
+        hs.append(c.h)
+        ss = ss + c.s
+        vs = vs + c.v
+        wait(30)
+    if max(hs) - min(hs) > 180:
+        hs = [h + 360 if h < 180 else h for h in hs]
+    h = (sum(hs) // len(hs)) % 360
+    return h, ss // 5, vs // 5
+
+
+def teach(parts):
+    # T <name> <h> <s> <v>  |  T reset
+    if len(parts) == 2 and parts[1] == "reset":
+        for i in range(len(COLORS)):
+            COLORS[i][0] = DEFAULT_COLORS[i][0]
+        use_colors()
+        out("T ok reset")
+        return
+    if len(parts) != 5:
+        out("E arahan")
+        return
+    try:
+        h = int(parts[2]) % 360
+        sat = int(parts[3])
+        val = int(parts[4])
+    except ValueError:
+        out("E arahan")
+        return
+    for pair in COLORS:
+        if pair[1] == parts[1]:
+            pair[0] = Color(h, sat, val)
+            use_colors()
+            out("T ok " + parts[1])
+            return
+    out("E arahan")
 
 
 def read_color():
@@ -349,9 +466,11 @@ def handle(line, state):
         state["extra"] = False
     elif cmd == "M" and len(parts) == 3:
         if valid(parts[1], "LRSXCUFN") and valid(parts[2], "01"):
+            same = parts[1] == roles and parts[2] == inverts
             roles = parts[1]
             inverts = parts[2]
-            setup()
+            if not same or failed > 0:
+                setup()  # nothing changed and all ports work: keep running as is
             state["drive"] = False
             state["extra"] = False
             state["color"] = None
@@ -387,12 +506,23 @@ def handle(line, state):
         test_motor(NAMES.index(parts[1]))
         state["drive"] = False
         state["extra"] = False
+    elif cmd == "H":
+        if sensor is None:
+            out("H nosensor")
+        else:
+            try:
+                h, sat, val = measure()
+                out("H " + str(h) + " " + str(sat) + " " + str(val))
+            except Exception as ex:
+                out("H ralat " + str(ex))
+    elif cmd == "T":
+        teach(parts)
     elif cmd == "Q":
         scan_ports()
     elif cmd == "K":
         scan_now()
     elif cmd == "P":
-        out("P 6")
+        out("P 8")
     elif cmd == "X":
         return False
     else:
@@ -402,7 +532,7 @@ def handle(line, state):
 
 def run():
     hub.light.on(Color.GREEN)
-    out("SPIKECTL 6")
+    out("SPIKECTL 8")
     scan_ports()
 
     keyboard = poll()
